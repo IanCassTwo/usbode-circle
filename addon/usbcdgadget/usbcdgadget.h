@@ -35,6 +35,12 @@
 #include <cueparser/cueparser.h>
 #include <discimage/cuebinfile.h>
 
+// For refactoring SCSI commands
+#include <map>
+#include <memory>
+#include "scsi_command_handler.h" // Base class for SCSI handlers
+#include "scsi_cmd_00_test_unit_ready.h" // Example concrete handler
+
 #ifndef USB_GADGET_DEVICE_ID_CD
 #define USB_GADGET_DEVICE_ID_CD 0x1d6b
 #endif
@@ -520,10 +526,18 @@ class CUSBCDGadget : public CDWUSBGadget  /// USB mass storage device gadget
 
     void ProcessOut(size_t nLength);
 
+   public: // Made public for ScsiCommandHandler helpers
+    void SendCSW();
+    void StartDataInTransfer(void* buffer, size_t length); // New helper for handlers
+    bool IsCDReady() const;
+    void SetSenseParameters(u8 sense_key, u8 asc, u8 ascq);
+    u8 GetCurrentCSWStatus() const;
+    const char* GetHardwareSerialNumber() const; // For Inquiry VPD Page 0x80
+
    private:
     void HandleSCSICommand();
 
-    void SendCSW();
+    // void SendCSW(); // Moved to public
     CUETrackInfo GetTrackInfoForLBA(u32 lba);
     CUETrackInfo GetTrackInfoForTrack(int track);
     int GetSkipbytesForTrack(CUETrackInfo trackInfo);
@@ -584,11 +598,35 @@ class CUSBCDGadget : public CDWUSBGadget  /// USB mass storage device gadget
         DataOutWrite
     };
 
+    // TCDState m_nState = Init; // Public for now, may refine later
+    // Public members for ScsiCommandHandler access (can be refactored with getters/setters if needed)
+    public:
     TCDState m_nState = Init;
-
     TUSBCDCBW m_CBW;
     TUSBCDCSW m_CSW;
+    SenseParameters m_SenseParams;
+    CUSBCDGadgetEndpoint *m_pEP[NumEPs]; // Made public for now for BeginTransfer access in handlers, review later
+    // DMA_BUFFER references are tricky to make public directly if they are class members.
+    // Access to m_InBuffer, m_OutBuffer will be via methods or direct if truly necessary and careful.
+    // For now, handlers will fill a buffer they own or get from gadget, then pass to StartDataInTransfer.
+    // Or gadget provides access to its m_InBuffer.
+    u8* GetInBuffer() { return m_InBuffer; } // Provide getter for m_InBuffer
+    u8* GetOutBuffer() { return m_OutBuffer; } // Provide getter for m_OutBuffer
+    u8* GetFileChunkBuffer() { return m_FileChunk; } // Provide getter for m_FileChunk
 
+    // SCSI command handler infrastructure
+    std::map<uint8_t, std::unique_ptr<ScsiCommandHandler>> m_scsi_handlers;
+    ScsiCommandHandler* m_pCurrentCommandHandler = nullptr;
+
+    // Other members that were private/protected, now potentially accessed by handlers via 'gadget->'
+    // ICueDevice *m_pDevice; // Already accessible via methods like gadget->m_pDevice->Read()
+    // u8 m_StringDescriptorBuffer[80]; // Internal to gadget
+    // TUSBDeviceDescriptor s_DeviceDescriptor; // static const
+    // TUSBMSTGadgetConfigurationDescriptor s_ConfigurationDescriptorFullSpeed; // static const
+    // const char *const s_StringDescriptor[]; // static const
+
+    // Various reply structs - handlers will populate these in the gadget's InBuffer or their own buffer
+    public: // Make reply structs accessible to handlers
     TUSBCDInquiryReply m_InqReply{
 	 0x05, // Peripheral type = CD/DVD
 	 0x80, // RMB set = removable media 
@@ -640,6 +678,12 @@ class CUSBCDGadget : public CDWUSBGadget  /// USB mass storage device gadget
         0x00,            // sksv
         {0x0, 0x0, 0x0}  // sense key specific
     };
+    // public: // Already covered by the public block above for m_InqReply
+    TUSBCDReadCapacityReply m_ReadCapReply{ // Make m_ReadCapReply public too for its handler
+        htonl(0x00),  // get's overridden in CUSBCDGadget::InitDeviceSize
+        htonl(2048)};
+    TUSBCDModeSenseReply m_ModeSenseReply{3, 0, 0, 0}; // Make m_ModeSenseReply public for its handler
+
 
     // static for now
     TUSBCDReadTOCReply m_TOCReply = {
@@ -785,25 +829,31 @@ class CUSBCDGadget : public CDWUSBGadget  /// USB mass storage device gadget
     DMA_BUFFER(u8, m_InBuffer, MaxInMessageSize);
     DMA_BUFFER(u8, m_OutBuffer, MaxOutMessageSize);
 
+    // Members accessed by handlers
+    public:
     u32 m_nblock_address;
     u32 m_nnumber_blocks;
     // u64 m_nDeviceBlocks=0;
     u32 m_nbyteCount;
-    boolean m_CDReady = false;
+    boolean m_CDReady = false; // Access via IsCDReady()
 
-    CUEParser cueParser;
+    CUEParser cueParser; // Handlers might need to call gadget->cueParser methods
 
-    u8 bmCSWStatus = 0;
-    SenseParameters m_SenseParams;
+    u8 bmCSWStatus = 0; // Accessed via GetCurrentCSWStatus(), and set by handlers before calling SendCSW
+    // SenseParameters m_SenseParams; // Already public
     int data_skip_bytes = 0;
     int data_block_size = 2048;
     int skip_bytes = 0;
     int block_size = 2048;
     int transfer_block_size = 2048;
-    int file_mode = 1;
+    int file_mode = 1; // This seems unused, might be legacy
+    // boolean m_IsFullSpeed = 0; // Internal to gadget
+    boolean discChanged = false; // Handlers might need to set/check this
+    uint8_t mcs = 0; // Main Channel Selection, used by Read CD like commands
+    // int file_mode = 1; // This seems unused, removing.
+
+    private: // Keep m_IsFullSpeed private
     boolean m_IsFullSpeed = 0;
-    boolean discChanged = false;
-    uint8_t mcs = 0;
 
     // Hardware serial number for USB device identification
     char m_HardwareSerialNumber[20];   // Format: "USBODE-XXXXXXXX"
