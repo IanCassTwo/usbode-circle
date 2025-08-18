@@ -1,6 +1,9 @@
 #ifndef _HTTPDEVICE_H
 #define _HTTPDEVICE_H
 
+#ifndef _HTTPDEVICE_H
+#define _HTTPDEVICE_H
+
 #include <circle/device.h>
 #include <circle/fs/partitionmanager.h>
 #include <circle/interrupt.h>
@@ -8,15 +11,17 @@
 #include <circle/sysconfig.h>
 #include <circle/timer.h>
 #include <circle/types.h>
-#include <fatfs/ff.h>
-#include <linux/kernel.h>
+#include <circle/net/tcpconnection.h>
+#include <circle/net/dnsclient.h>
+#include <circle/net/ipaddress.h>
+#include <circle/netsubsystem.h>
 
 #include "filetype.h"
 #include "cuedevice.h"
 
 class HTTPFileDevice : public ICueDevice {
    public:
-    HTTPFileDevice(FIL* pFile, char* cue_str = nullptr);
+    HTTPFileDevice(CNetSubSystem *pNet, const char *pFileURL, const char *pCueURL = nullptr);
     ~HTTPFileDevice(void);
 
     int Read(void* pBuffer, size_t nCount);
@@ -27,6 +32,23 @@ class HTTPFileDevice : public ICueDevice {
     const char* GetCueSheet() const;
 
    private:
+    boolean Connect(void);
+    boolean ParseURL(const char *pURL);
+    int SendRequest(const char *pRequest, void *pBuffer, size_t nSize);
+
+    FileType m_FileType;
+    char *m_pURL;
+    char *m_pHost;
+    u16 m_nPort;
+    char *m_pPath;
+    u64 m_nSize;
+    u64 m_nPos;
+    char* m_pCueSheet;
+
+    CNetSubSystem *m_pNet;
+    CDNSClient *m_pDNSClient;
+    CTCPConnection *m_pTCPConnection;
+    CIPAddress m_ServerIP;
 };
 
 #endif
