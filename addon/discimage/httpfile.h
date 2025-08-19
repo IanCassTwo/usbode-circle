@@ -44,6 +44,7 @@ class HTTPFileDevice : public ICueDevice {
     char *m_pPath;
     unsigned m_nSize;
     unsigned m_nPos;
+    size_t m_nContentLength;
     char* m_pCueSheet;
     bool haveHostname = false;
 

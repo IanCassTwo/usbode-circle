@@ -44,6 +44,7 @@ HTTPFileDevice::HTTPFileDevice(const char *pFileURL, const char *pCueURL) :
     m_pPath(0),
     m_nSize(0),
     m_nPos(0),
+    m_nContentLength(0),
     m_pCueSheet(0),
     m_pDNSClient(0),
     m_pSocket(0)
@@ -313,226 +314,180 @@ THTTPStatus HTTPFileDevice::SendHeadRequest(const char *pRequest, size_t *pLengt
 
 THTTPStatus HTTPFileDevice::SendRequest(const char *pRequest, unsigned char *pBuffer, size_t *pLength)
 {
-    //LOGNOTE("SendRequest");
-    if (!m_pSocket )
+    // This implementation is a complete rewrite of the original SendRequest.
+    // It is designed to support persistent connections by honoring Content-Length.
+    // NOTE: Chunked transfer encoding is not supported in this version. The original
+    // implementation had a buggy and inefficient byte-by-byte chunked decoder.
+    // A proper block-based chunked decoder is a more complex task.
+
+    if (!m_pSocket)
     {
         if (!Connect())
         {
-            LOGNOTE("Not connected!");
+            LOGERR("Not connected!");
             return HTTPRequestTimeout;
         }
     }
 
-    	if (m_pSocket->Send (pRequest, strlen(pRequest), 0) < 0)
-	{
-		delete m_pSocket;
-		m_pSocket = 0;
+    if (m_pSocket->Send(pRequest, strlen(pRequest), 0) < 0)
+    {
+        delete m_pSocket;
+        m_pSocket = 0;
+        return HTTPConnectionReset;
+    }
 
-		return HTTPConnectionReset;
-	}
+    char header_buf[4096];
+    char* body_start = nullptr;
+    int header_len = 0;
+    int bytes_received;
 
-	// receive HTTP response and parse it
-	unsigned nState = 0;
-	unsigned nLine = 0;
-	unsigned nChar = 0;
-	unsigned nLength = 0;
-	boolean bChunked = FALSE;
-	unsigned long ulBytes = 0;
+    // Read headers until we find the \r\n\r\n separator
+    while (header_len < (int)sizeof(header_buf) - 1)
+    {
+        bytes_received = m_pSocket->Receive(header_buf + header_len, sizeof(header_buf) - header_len - 1, 0);
+        if (bytes_received <= 0)
+        {
+            delete m_pSocket;
+            m_pSocket = 0;
+            return HTTPConnectionReset;
+        }
+        header_len += bytes_received;
+        header_buf[header_len] = '\0';
 
-	char Buffer[(16 * 2352) + 1024];
-	char Line[HTTP_MAX_REQUEST_LINE];
-	int nResult;
-	char *pSavePtr;
+        if ((body_start = strstr(header_buf, "\r\n\r\n")) != nullptr)
+        {
+            body_start += 4; // Point to the beginning of the body
+            break;
+        }
+    }
 
-	while (   nState < 5
-	       && (nResult = m_pSocket->Receive (Buffer, sizeof Buffer, 0)) > 0)
-	{
-		for (int i = 0; i < nResult; i++)
-		{
-			u8 chChar = Buffer[i];
+    if (!body_start)
+    {
+        LOGERR("HTTP headers too large or not found");
+        // We can't recover from this, so close the connection
+        delete m_pSocket;
+        m_pSocket = 0;
+        return HTTPInvalidResponseCode;
+    }
 
-			switch (nState)
-			{
-			case 0:				// response header
-				if (chChar == '\r')
-				{
-					continue;
-				}
+    // Terminate the headers string for parsing
+    *(body_start - 4) = '\0';
 
-				if (chChar == '\n')		// end of line
-				{
-					if (nChar == 0)		// empty line is end of header
-					{
-						nState = bChunked ? 2 : 1;
-						//LOGNOTE("End of headers, switching to state %d", nState);
-						nChar = 0;
-					}
-					else
-					{
-						if (nLine++ == 0)	// first line?
-						{
-							// "HTTP/1.x 200 OK" or 206 Partial Content expected
-							//LOGNOTE("First line %s", Line);
-							char *pToken;
-							if ((pToken = strtok_r(Line, "/", &pSavePtr)) == 0
-							    || strcmp(pToken, "HTTP") != 0
-							    || (pToken = strtok_r(0, " ", &pSavePtr)) == 0
-							    || (pToken = strtok_r(0, " ", &pSavePtr)) == 0)
-							{
-							    // tokenization failed
-							    LOGERR("Malformed HTTP status line: %s", Line);
-							    delete m_pSocket;
-							    m_pSocket = 0;
-							    return HTTPInvalidResponseCode;
-							}
+    // Parse status line
+    char* status_line = header_buf;
+    char* headers_start = strstr(status_line, "\r\n");
+    if (headers_start)
+    {
+        *headers_start = '\0';
+        headers_start += 2;
+    }
 
-							// tokenization succeeded, parse the status code
-							char *pEnd;
-							unsigned long ulStatus = strtoul(pToken, &pEnd, 10);
-							if (pEnd == pToken || *pEnd != '\0' || ulStatus < 200 || ulStatus >= 300)
-							{
-							    LOGERR("Unexpected HTTP response: %s", Line);
-							    delete m_pSocket;
-							    m_pSocket = 0;
-							    return HTTPInvalidResponseCode;
-							}
-						}
-						else
-						{
-							//LOGNOTE("Header line %s", Line);
-							// check for transfer encoding option
-							char *pToken = strtok_r (Line, ": ", &pSavePtr);
-							if (   pToken != 0
-							    && strcasecmp (pToken, "Transfer-Encoding") == 0)
-							{
-								pToken = strtok_r (0, " ", &pSavePtr);
-								if (pToken != 0
-								    && strcasecmp (pToken, "chunked") == 0)
-								{
-									bChunked = TRUE;
-								}
-							}
-						}
+    char* pSavePtr_status;
+    char* http_version = strtok_r(status_line, " ", &pSavePtr_status);
+    char* status_code_str = strtok_r(NULL, " ", &pSavePtr_status);
+    if (!http_version || !status_code_str || strncmp(http_version, "HTTP/", 5) != 0)
+    {
+        LOGERR("Malformed HTTP status line");
+        // Don't close connection, but we can't proceed
+        return HTTPInvalidResponseCode;
+    }
 
-						nChar = 0;
-					}
-				}
-				else
-				{
-					// accumulate option line
-					if (nChar < sizeof Line-1)
-					{
-						Line[nChar++] = chChar;
-						Line[nChar] = '\0';
-					}
-				}
-				break;
+    long status_code = atol(status_code_str);
+    if (status_code < 200 || status_code >= 300)
+    {
+        LOGWARN("HTTP request failed with status: %ld", status_code);
+        // We will still try to read the body to keep the connection alive.
+    }
 
-			case 1:				// non-chunked data: simply copy it
-				assert (pLength != 0);
-				if (nLength >= *pLength)
-				{
-					delete m_pSocket;
-					m_pSocket = 0;
+    // Parse headers for Content-Length
+    m_nContentLength = 0;
+    bool chunked = false;
+    if (headers_start)
+    {
+	    char *pSavePtr_headers;
+        char* header_line = strtok_r(headers_start, "\r\n", &pSavePtr_headers);
+        while (header_line)
+        {
+            if (strncasecmp(header_line, "Content-Length:", 15) == 0)
+            {
+                m_nContentLength = atoll(header_line + 15);
+            }
+            else if (strncasecmp(header_line, "Transfer-Encoding:", 18) == 0)
+            {
+                if (strstr(header_line + 18, "chunked"))
+                {
+                    chunked = true;
+                }
+            }
+            header_line = strtok_r(NULL, "\r\n", &pSavePtr_headers);
+        }
+    }
 
-					return HTTPContentBufferTooSmall;
-				}
+    if (chunked)
+    {
+        LOGERR("Chunked transfer encoding is not supported.");
+        delete m_pSocket;
+        m_pSocket = 0;
+        return HTTPMethodNotImplemented;
+    }
 
-				*pBuffer++ = (u8) chChar;
-				nLength++;
-				break;
+    size_t body_bytes_in_buf = header_len - (body_start - header_buf);
+    size_t total_body_bytes_read = 0;
 
-			case 2:				// chunk header
-				if (chChar == '\r')
-				{
-					continue;
-				}
+    if (pBuffer && pLength && *pLength > 0)
+    {
+        // Copy body part that was already received with headers
+        size_t bytes_to_copy = (body_bytes_in_buf < *pLength) ? body_bytes_in_buf : *pLength;
+        memcpy(pBuffer, body_start, bytes_to_copy);
+        total_body_bytes_read = bytes_to_copy;
 
-				if (chChar == '\n')	// end of header?
-				{
-					char *pEnd;
-					ulBytes = strtoul (Line, &pEnd, 16);	// convert chunk length
-					if (   pEnd != 0
-					    && *pEnd != '\0')
-					{
-						delete m_pSocket;
-						m_pSocket = 0;
+        // Read remaining body from socket
+        while (total_body_bytes_read < m_nContentLength && total_body_bytes_read < *pLength)
+        {
+            size_t bytes_to_read = *pLength - total_body_bytes_read;
+            if (bytes_to_read > m_nContentLength - total_body_bytes_read)
+            {
+                bytes_to_read = m_nContentLength - total_body_bytes_read;
+            }
 
-						return HTTPInvalidChunkHeader;
-					}
+            bytes_received = m_pSocket->Receive(pBuffer + total_body_bytes_read, bytes_to_read, 0);
+            if (bytes_received <= 0)
+            {
+                delete m_pSocket;
+                m_pSocket = 0;
+                return HTTPConnectionReset;
+            }
+            total_body_bytes_read += bytes_received;
+        }
+    }
 
-					nState = ulBytes != 0 ? 3 : 5;	// length 0 is end of file
-				}
-				else
-				{
-					// accumulate chunk header line
-					if (nChar < sizeof Line-1)
-					{
-						Line[nChar++] = chChar;
-						Line[nChar] = '\0';
-					}
-				}
-				break;
+    // If we haven't read the entire body (e.g. because user buffer was too small),
+    // we need to read and discard the rest to keep the connection in a good state.
+    size_t remaining_bytes_to_discard = m_nContentLength - total_body_bytes_read;
+    if (remaining_bytes_to_discard > 0)
+    {
+        char discard_buf[256];
+        while (remaining_bytes_to_discard > 0)
+        {
+            size_t bytes_to_read = (remaining_bytes_to_discard > sizeof(discard_buf)) ? sizeof(discard_buf) : remaining_bytes_to_discard;
+            bytes_received = m_pSocket->Receive(discard_buf, bytes_to_read, 0);
+            if (bytes_received <= 0)
+            {
+                delete m_pSocket;
+                m_pSocket = 0;
+                return HTTPConnectionReset;
+            }
+            remaining_bytes_to_discard -= bytes_received;
+        }
+    }
 
-			case 3:				// chunk data: copy ulBytes
-				assert (pLength != 0);
-				if (nLength >= *pLength)
-				{
-					delete m_pSocket;
-					m_pSocket = 0;
 
-					return HTTPContentBufferTooSmall;
-				}
+    if (pLength)
+    {
+        *pLength = total_body_bytes_read;
+    }
 
-				//LOGNOTE("chunked copying char %02x", chChar);
-				*pBuffer++ = (u8) chChar;
-				nLength++;
-
-				if (--ulBytes == 0)
-				{
-					nState = 4;
-				}
-				break;
-
-			case 4:				// chunk trailer
-				if (chChar == '\r')
-				{
-					continue;
-				}
-
-				if (chChar != '\n')	// newline expected
-				{
-					delete m_pSocket;
-					m_pSocket = 0;
-
-					return HTTPInvalidChunkHeader;
-				}
-
-				nChar = 0;
-				nState = 2;
-				break;
-			}
-		}
-	}
-
-	// close everything and exit
-	if (   nState < 5
-	    && nState != 1)
-	{
-		delete m_pSocket;
-		m_pSocket = 0;
-
-		return HTTPConnectionReset;
-	}
-
-	delete m_pSocket;
-	m_pSocket = 0;
-
-	assert (pLength != 0);
-	assert (nLength <= *pLength);
-	*pLength = nLength;
-
-	return HTTPOK;
+    return HTTPOK;
 }
 
 int HTTPFileDevice::Read(void *pBuffer, size_t nSize) {
@@ -549,7 +504,7 @@ int HTTPFileDevice::Read(void *pBuffer, size_t nSize) {
     }
 
     char request[256];
-    sprintf(request, "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nRange: bytes=%u-%u\r\n\r\n",
+    sprintf(request, "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\nRange: bytes=%u-%u\r\n\r\n",
             m_pPath, m_pHost, m_nPos, m_nPos + nSize - 1);
 
     //LOGNOTE("HTTP Request is %s", request);
