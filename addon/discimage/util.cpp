@@ -21,8 +21,9 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 #include "util.h"
+#include "httpfile.h"
 
-LOGMODULE("cueparser-util");
+LOGMODULE("discimage-util");
 
 char tolower(char c) {
     if (c >= 'A' && c <= 'Z')
@@ -62,6 +63,18 @@ bool hasIsoExtension(const char* imageName) {
                tolower(ext[1]) == 'i' &&
                tolower(ext[2]) == 's' &&
                tolower(ext[3]) == 'o';
+    }
+    return false;
+}
+
+bool hasURLExtension(const char* imageName) {
+    size_t len = strlen(imageName);
+    if (len >= 4) {
+        const char* ext = imageName + len - 4;
+        return tolower(ext[0]) == '.' &&
+               tolower(ext[1]) == 'u' &&
+               tolower(ext[2]) == 'r' &&
+               tolower(ext[3]) == 'l';
     }
     return false;
 }
@@ -116,6 +129,63 @@ bool ReadFileToString(const char* fullPath, char** out_str) {
     buffer[file_size] = '\0';  // null-terminate
     *out_str = buffer;
     return true;
+}
+
+bool isFile(const char *filename) {
+    return (hasBinExtension(filename) || hasCueExtension(filename) || hasIsoExtension(filename));
+}
+
+bool isURL(const char *filename) {
+    return hasURLExtension(filename);
+}
+
+ICueDevice* loadFileDevice(const char* imageName) {
+    LOGNOTE("Loading File Device for %s", imageName);
+    if (isFile(imageName)) {
+	LOGNOTE("Loading cue/bin file device");
+        return loadCueBinFileDevice(imageName);
+    } else if (isURL(imageName)) {
+	LOGNOTE("Loading http file device");
+        return loadHTTPFileDevice(imageName);
+    } else {
+        LOGERR("Unknown file type!");
+	return nullptr;
+    }
+}
+
+ICueDevice* loadHTTPFileDevice(const char* imageName) {
+    // Construct full path
+    char fullPath[MAX_FILENAME];  // FIXME limits
+    snprintf(fullPath, sizeof(fullPath), "SD:/images/%s", imageName);
+    FIL* imageFile = new FIL();
+
+    FRESULT Result = f_open(imageFile, fullPath, FA_READ);
+    if (Result != FR_OK) {
+        LOGERR("Cannot open image file for reading");
+        delete imageFile;
+        return nullptr;
+    }
+    LOGNOTE("Opened image file %s", fullPath);
+
+    // Buffer for one line
+    char line[256];  // adjust size depending on expected line length
+
+    // Read a single line
+    if (f_gets(line, sizeof(line), imageFile)) {
+        // Successfully read one line into 'line'
+        LOGNOTE("First line: %s", line);
+    } else {
+        LOGERR("Failed to read line (possibly EOF or error)");
+    }
+
+    f_close(imageFile);
+    delete imageFile;
+
+    //TODO add cue/bin handling
+    //TODO for now, let's assume it's .iso
+
+    // Create our device
+    return new HTTPFileDevice(line, nullptr);
 }
 
 ICueDevice* loadCueBinFileDevice(const char* imageName) {

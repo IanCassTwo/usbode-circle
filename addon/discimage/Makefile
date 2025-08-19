@@ -14,7 +14,11 @@ libdiscimage.a: $(OBJS)
 	@rm -f $@
 	@$(AR) cr $@ $(OBJS)
 
-include $(STDLIBHOME)/Config.mk
+
+#include $(STDLIBHOME)/Config.mk
 include $(CIRCLEHOME)/Rules.mk
+
+CFLAGS += -I $(STDLIBHOME)/include -I $(STDDEF_INCPATH) -I ../../addon
+CFLAGS += -D_TIME_T_DECLARED
 
 -include $(DEPS)
