@@ -122,3 +122,7 @@ const char *CCueBinFileDevice::GetCueSheet() const {
     return m_cue_str;
 }
 
+Type CCueBinFileDevice::GetType() const
+{
+    return Type::CueBinFileDevice;
+}

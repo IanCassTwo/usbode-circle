@@ -644,3 +644,8 @@ boolean HTTPFileDevice::ConvertIPString (const char *pIPString, CIPAddress *pIPA
 
 	return TRUE;
 }
+
+Type HTTPFileDevice::GetType() const
+{ 
+    return Type::HTTPFileDevice; 
+}

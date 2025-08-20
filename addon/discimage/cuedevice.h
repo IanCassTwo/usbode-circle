@@ -3,6 +3,12 @@
 
 #include <circle/device.h>
 
+enum class Type {
+    ICueDevice,
+    CueBinFileDevice,
+    HTTPFileDevice,
+};
+
 class ICueDevice : public CDevice {
 public:
     ICueDevice() = default;
@@ -13,5 +19,7 @@ public:
 
     /// \return Cue sheet string, or nullptr if not available
     virtual const char* GetCueSheet() const = 0;
+
+    virtual Type GetType() const { return Type::ICueDevice; }
 };
 #endif

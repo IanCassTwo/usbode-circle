@@ -27,6 +27,7 @@ class HTTPFileDevice : public ICueDevice {
     u64 GetSize(void) const;
     u64 Tell() const;
     const char* GetCueSheet() const;
+    Type GetType() const override;
 
    private:
     boolean Connect(void);

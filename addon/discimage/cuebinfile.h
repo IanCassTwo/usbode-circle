@@ -27,6 +27,7 @@ class CCueBinFileDevice : public ICueDevice {
     u64 GetSize(void) const;
     u64 Tell() const;
     const char* GetCueSheet() const;
+    Type GetType() const override;
 
    private:
     FIL* m_pFile;

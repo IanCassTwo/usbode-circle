@@ -225,13 +225,15 @@ void SCSITBService::Run() {
 
 			// Load it
 			char* imageName = m_FileEntries[next_cd].name;
-			ICueDevice* cueBinFileDevice = loadFileDevice(imageName);
+			ICueDevice* cueDevice = loadFileDevice(imageName);
 			
 			// Set the new device in the CD gadget
-    			cdromservice->SetDevice(cueBinFileDevice);
+    			cdromservice->SetDevice(cueDevice);
 
 			// Save current mounted image name
-			configservice->SetCurrentImage(imageName);
+			// but only if it's stored on a local device
+			if (cueDevice->GetType() == Type::CueBinFileDevice)
+				configservice->SetCurrentImage(imageName);
 
 			current_cd = next_cd;
 
